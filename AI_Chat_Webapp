@@ -1,0 +1,104 @@
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import torch
+import requests
+import edge_tts
+import asyncio
+import subprocess
+import gradio as gr
+import speech_recognition as sr
+import os
+import uuid
+import soundfile as sf
+import time
+import websocket
+
+# ---------- Load Model ----------
+model_id = "microsoft/DialoGPT-small"
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+tokenizer.pad_token = tokenizer.eos_token
+model = AutoModelForCausalLM.from_pretrained(model_id)
+
+# ---------- TTS ----------
+async def tts_to_mp3(text, output_file="AI_output.mp3", voice="en-US-GuyNeural"):
+    tts = edge_tts.Communicate(text=text, voice=voice)
+    await tts.save(output_file)
+    return output_file
+
+# ---------- Audio Playback ----------
+def play_audio(file_path):
+    subprocess.run(['ffplay', '-nodisp', '-autoexit', file_path],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# ---------- WebSocket Audio Sender ----------
+def send_audio_via_websocket(file_path, ws_url="ws://localhost:8000/ws"):
+    try:
+        start = time.time()
+
+        with open(file_path, 'rb') as f:
+            data = f.read()
+
+        ws = websocket.create_connection(ws_url)
+        ws.send_binary(data)
+        ws.close()
+
+        end = time.time()
+        return round(end - start, 3)  # seconds
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+        return None
+
+# ---------- Chatbot Logic ----------
+def handle_audio(audio_input):
+    recognizer = sr.Recognizer()
+
+    try:
+        sample_rate, audio_np_array = audio_input
+        print(f"📥 Received audio of shape: {audio_np_array.shape}, rate: {sample_rate}")
+
+        if len(audio_np_array.shape) == 2 and audio_np_array.shape[1] > 1:
+            audio_np_array = audio_np_array[:, 0]
+            print("🔄 Converted stereo to mono")
+
+        wav_path = "./debug_audio.wav"
+        sf.write(wav_path, audio_np_array, sample_rate)
+        print(f"✅ Saved to WAV: {wav_path}")
+
+        with sr.AudioFile(wav_path) as source:
+            audio = recognizer.record(source)
+        transcript = recognizer.recognize_google(audio)
+        print(f"🧠 Transcript: {transcript}")
+
+    except Exception as e:
+        print(f"❌ Speech recognition failed:\n{e.__class__.__name__}: {e}")
+        return "Speech recognition error.", None
+
+    try:
+        input_ids = tokenizer.encode(transcript + tokenizer.eos_token, return_tensors="pt")
+        output_ids = model.generate(input_ids, max_length=100, pad_token_id=tokenizer.eos_token_id)
+        response = tokenizer.decode(output_ids[:, input_ids.shape[-1]:][0], skip_special_tokens=True)
+        print(f"🤖 Response: {response}")
+    except Exception as e:
+        print(f"❌ AI generation failed:\n{e.__class__.__name__}: {e}")
+        return "AI generation error.", None
+
+    try:
+        output_file = asyncio.run(tts_to_mp3(response))
+
+        # ✅ Attempt WebSocket transfer
+        transfer_time = send_audio_via_websocket(output_file)
+
+        # ✅ Display transfer time or fallback
+        transfer_display = f"⏱️ Transfer time: {transfer_time:.3f} seconds" if transfer_time else "❌ No WebSocket transfer"
+
+        return f"{response}\n\n{transfer_display}", output_file
+    except Exception as e:
+        print(f"❌ TTS generation failed:\n{e.__class__.__name__}: {e}")
+        return "TTS generation error.", None
+
+# ---------- Gradio Interface ----------
+gr.Interface(
+    fn=handle_audio,
+    inputs=gr.Mic(label="🎙️ Speak"),
+    outputs=[gr.Textbox(label="🤖 Response"), gr.Audio(label="🔊 Spoken Response")],
+    title="🗣️ Local AI Voice Chatbot"
+).launch(server_name="localhost", server_port=7000)
