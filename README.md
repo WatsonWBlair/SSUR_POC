@@ -1,2 +1,5 @@
 # SSUR_POC
-Proof of concept implementation for Voice to Voice chatbot
+Proof of concept implementation for Voice to Voice chatbot. 
+
+Client Side Application:
+- 
